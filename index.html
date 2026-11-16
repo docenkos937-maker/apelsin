@@ -1,0 +1,125 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, interactive-widget=resizes-content">
+  <title>Апельсин</title>
+  <meta name="description" content="Рабочий мессенджер">
+  <meta name="theme-color" content="#f27a1a" media="(prefers-color-scheme: light)">
+  <meta name="theme-color" content="#17181b" media="(prefers-color-scheme: dark)">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-title" content="Апельсин">
+  <meta name="apple-mobile-web-app-status-bar-style" content="default">
+  <link rel="manifest" href="manifest.webmanifest">
+  <link rel="icon" href="icons/icon.svg" type="image/svg+xml">
+  <link rel="apple-touch-icon" href="icons/apple-touch-icon.png">
+  <link rel="stylesheet" href="app.css">
+</head>
+<body>
+
+  <!-- База ещё не подключена -->
+  <section id="setup" class="center" hidden>
+    <div class="card">
+      <img class="logo" src="icons/icon.svg" alt="">
+      <h1>Мессенджер ещё не подключён</h1>
+      <p class="muted">В файле <code>config.js</code> нужно указать адрес проекта Supabase и публичный ключ. Как это сделать, написано в <code>README.md</code>.</p>
+    </div>
+  </section>
+
+  <!-- Вход и регистрация -->
+  <section id="auth" class="center" hidden>
+    <form class="card" id="auth-form" autocomplete="on">
+      <img class="logo" src="icons/icon.svg" alt="">
+      <h1 id="auth-title">Вход</h1>
+      <label class="field" id="auth-name-field" hidden>
+        <span>Имя и фамилия</span>
+        <input id="auth-name" type="text" maxlength="60" autocomplete="name">
+      </label>
+      <label class="field">
+        <span>Почта</span>
+        <input id="auth-email" type="email" required autocomplete="email" inputmode="email">
+      </label>
+      <label class="field">
+        <span>Пароль</span>
+        <input id="auth-password" type="password" required minlength="6" autocomplete="current-password">
+      </label>
+      <label class="field" id="auth-invite-field" hidden>
+        <span>Код приглашения</span>
+        <input id="auth-invite" type="text" autocomplete="off" autocapitalize="off" spellcheck="false">
+      </label>
+      <p class="hint" id="auth-first" hidden>Ты регистрируешься первым, поэтому станешь администратором. Код приглашения не нужен.</p>
+      <p class="error" id="auth-error" hidden></p>
+      <button class="btn primary" id="auth-submit" type="submit">Войти</button>
+      <button class="btn link" id="auth-switch" type="button">Нет аккаунта? Зарегистрироваться</button>
+    </form>
+  </section>
+
+  <!-- Доступ закрыт -->
+  <section id="blocked" class="center" hidden>
+    <div class="card">
+      <img class="logo" src="icons/icon.svg" alt="">
+      <h1>Доступ закрыт</h1>
+      <p class="muted">Администратор отключил этот аккаунт.</p>
+      <button class="btn" id="blocked-logout" type="button">Выйти</button>
+    </div>
+  </section>
+
+  <!-- Основной экран -->
+  <div id="main" class="main" hidden>
+    <aside class="side">
+      <header class="bar">
+        <button class="icon-btn avatar-btn" id="me-btn" type="button" aria-label="Профиль и настройки"></button>
+        <h2>Чаты</h2>
+        <button class="icon-btn" id="new-chat-btn" type="button" aria-label="Новый чат">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>
+        </button>
+      </header>
+      <div class="search">
+        <input id="chat-search" type="search" placeholder="Поиск" aria-label="Поиск по чатам">
+      </div>
+      <div class="list" id="chat-list"></div>
+    </aside>
+
+    <section class="chat">
+      <div class="chat-empty" id="chat-empty">
+        <img src="icons/icon.svg" alt="">
+        <p>Выбери чат слева или начни новый</p>
+      </div>
+      <div class="chat-body" id="chat-body" hidden>
+        <header class="bar">
+          <button class="icon-btn back" id="back-btn" type="button" aria-label="Назад к чатам">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M15 5l-7 7 7 7"/></svg>
+          </button>
+          <button class="chat-head" id="chat-head" type="button">
+            <span id="chat-avatar"></span>
+            <span class="chat-head-text">
+              <strong id="chat-title"></strong>
+              <small id="chat-status"></small>
+            </span>
+          </button>
+        </header>
+        <div class="messages" id="messages"></div>
+        <form class="composer" id="composer">
+          <button class="icon-btn" id="attach-btn" type="button" aria-label="Прикрепить файл">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 11.5l-8.2 8.2a5 5 0 01-7.1-7.1l8.6-8.6a3.4 3.4 0 014.8 4.8l-8.5 8.5a1.8 1.8 0 01-2.5-2.5l7.8-7.8"/></svg>
+          </button>
+          <input id="file-input" type="file" multiple hidden>
+          <textarea id="message-input" rows="1" placeholder="Сообщение" maxlength="4000" aria-label="Сообщение"></textarea>
+          <button class="icon-btn send" id="send-btn" type="submit" aria-label="Отправить">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 12l16-8-6 16-3-7-7-1z"/></svg>
+          </button>
+        </form>
+      </div>
+    </section>
+  </div>
+
+  <dialog id="modal" class="modal"></dialog>
+  <dialog id="viewer" class="viewer"></dialog>
+  <div id="toast" class="toast" role="status" popover="manual" hidden></div>
+
+  <script src="vendor/supabase.js"></script>
+  <script src="config.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>
