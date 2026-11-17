@@ -459,8 +459,8 @@ create policy chat_files_insert on storage.objects for insert to authenticated
   with check (bucket_id = 'chat-files' and public.is_member_of_path(name));
 
 -- ───────────────────────── Мини-приложение «Учёт плёнок» ─────────────────────────
--- Продавец вносит по каждой плёнке базу и факт, администратор смотрит расхождения
--- и сам проставляет, сколько штук сейчас в пути.
+-- Продавец прямо в чате вносит по каждой плёнке базу и факт, отчёт уходит сообщением в этот чат.
+-- Администратор смотрит расхождения и сам проставляет, сколько штук сейчас в пути.
 
 create table if not exists public.stock_items (
   id         uuid primary key default gen_random_uuid(),
@@ -510,12 +510,18 @@ grant select on public.stock_items, public.stock_points, public.stock_reports, p
 grant insert, update on public.stock_items, public.stock_points to authenticated;
 grant update (in_transit) on public.stock_lines to authenticated;
 
+-- Отчёт видят администраторы, его автор и участники чата, в который он отправлен.
+create index if not exists messages_report_idx on public.messages (report_id) where report_id is not null;
+
 create or replace function public.can_see_report(p_report uuid) returns boolean
 language sql stable security definer set search_path = public as $$
-  select public.is_admin() or exists (
-    select 1 from stock_reports r
-    where r.id = p_report and r.author_id = auth.uid() and public.is_active()
-  );
+  select public.is_admin()
+    or exists (
+      select 1 from stock_reports r
+      where r.id = p_report and r.author_id = auth.uid() and public.is_active())
+    or exists (
+      select 1 from messages m
+      where m.report_id = p_report and public.is_member(m.chat_id));
 $$;
 
 drop policy if exists stock_items_select on public.stock_items;
@@ -549,28 +555,23 @@ drop policy if exists stock_lines_update on public.stock_lines;
 create policy stock_lines_update on public.stock_lines for update to authenticated
   using (public.is_admin()) with check (public.is_admin());
 
--- Отправка отчёта: сохраняет строки и пишет каждому администратору сообщение в личный чат.
+-- Отправка отчёта из чата: сохраняет строки и кладёт в этот же чат сообщение с кнопкой «Открыть отчёт».
 -- p_lines: [{"item_id": "...", "base": 10, "fact": 9, "comment": "..."}]
-create or replace function public.submit_stock_report(p_point uuid, p_comment text, p_lines jsonb) returns json
+create or replace function public.submit_stock_report(p_chat uuid, p_point uuid, p_comment text, p_lines jsonb) returns json
 language plpgsql security definer set search_path = public as $$
 declare
-  v_me       uuid := auth.uid();
-  v_point    text;
-  v_report   uuid;
-  v_total    int;
-  v_diffs    int;
-  v_admin    uuid;
-  v_chat     uuid;
-  v_message  uuid;
-  v_messages uuid[] := '{}';
-  v_text     text;
+  v_point   text;
+  v_report  uuid;
+  v_total   int;
+  v_diffs   int;
+  v_message uuid;
 begin
-  if not public.is_active() then raise exception 'NOT_ALLOWED'; end if;
+  if not public.is_member(p_chat) then raise exception 'NOT_ALLOWED'; end if;
   select name into v_point from stock_points where id = p_point and active;
   if v_point is null then raise exception 'POINT_NOT_FOUND'; end if;
 
   insert into stock_reports (point_id, author_id, comment)
-  values (p_point, v_me, left(trim(coalesce(p_comment, '')), 1000))
+  values (p_point, auth.uid(), left(trim(coalesce(p_comment, '')), 1000))
   returning id into v_report;
 
   insert into stock_lines (report_id, item_id, base, fact, comment)
@@ -583,20 +584,18 @@ begin
   from stock_lines where report_id = v_report;
   if v_total = 0 then raise exception 'NO_LINES'; end if;
 
-  v_text := '📋 Учёт плёнок, ' || v_point || ': '
+  insert into messages (chat_id, report_id, body)
+  values (p_chat, v_report, '📋 Учёт плёнок, ' || v_point || ': '
     || case when v_diffs = 0 then 'расхождений нет' else 'расхождений: ' || v_diffs end
-    || ' (позиций: ' || v_total || ')';
+    || ' (позиций: ' || v_total || ')')
+  returning id into v_message;
 
-  for v_admin in select id from profiles where is_admin and not blocked and id <> v_me loop
-    v_chat := public.start_direct(v_admin);
-    insert into messages (chat_id, body, report_id) values (v_chat, v_text, v_report)
-    returning id into v_message;
-    v_messages := v_messages || v_message;
-  end loop;
-
-  return json_build_object('report_id', v_report, 'message_ids', v_messages);
+  return json_build_object('report_id', v_report, 'message_id', v_message);
 end;
 $$;
 
-revoke execute on function public.can_see_report(uuid), public.submit_stock_report(uuid, text, jsonb) from public, anon;
-grant execute on function public.can_see_report(uuid), public.submit_stock_report(uuid, text, jsonb) to authenticated;
+-- Первая версия рассылала отчёт администраторам в личные чаты; она больше не нужна.
+drop function if exists public.submit_stock_report(uuid, text, jsonb);
+
+revoke execute on function public.can_see_report(uuid), public.submit_stock_report(uuid, uuid, text, jsonb) from public, anon;
+grant execute on function public.can_see_report(uuid), public.submit_stock_report(uuid, uuid, text, jsonb) to authenticated;

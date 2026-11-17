@@ -1134,16 +1134,7 @@
     openModal('Настройки', body);
   }
 
-  // ───────────────────────── Мини-приложения ─────────────────────────
-
-  function appsModal() {
-    openModal('Приложения', h('div', { class: 'people' },
-      h('button', { class: 'row', type: 'button', onclick: stockHome },
-        h('span', { class: 'avatar group app-icon', 'aria-hidden': 'true' }, '📋'),
-        h('span', { class: 'row-main' },
-          h('strong', null, 'Учёт плёнок'),
-          h('span', { class: 'preview' }, state.me.is_admin ? 'Отчёты точек: база, факт, расхождения' : 'Внести базу и факт по плёнкам')))));
-  }
+  // ───────────────────────── Мини-приложение в чате ─────────────────────────
 
   // Экран мини-приложения: заголовок, кнопка «Назад» и содержимое.
   function appView(title, back, content) {
@@ -1173,8 +1164,10 @@
   const signed = (n) => (n > 0 ? '+' + n : String(n).replace('-', '−'));
   const pointName = (id) => (stock.points.find((p) => p.id === id) || { name: 'Точка' }).name;
 
+  // Список отчётов: у администратора все, у остальных те, что им видны.
   async function stockHome() {
-    appView('Учёт плёнок', appsModal, h('p', { class: 'muted' }, 'Загрузка…'));
+    const back = () => stockNewReport();
+    appView('Отчёты по плёнкам', back, h('p', { class: 'muted' }, 'Загрузка…'));
     let reports;
     try {
       await stockLoadRefs();
@@ -1184,13 +1177,10 @@
       if (error) throw error;
       reports = data;
     } catch (error) {
-      return appView('Учёт плёнок', appsModal, h('p', { class: 'error' }, 'Не получилось загрузить. Проверь интернет и попробуй ещё раз.'));
+      return appView('Отчёты по плёнкам', back, h('p', { class: 'error' }, 'Не получилось загрузить. Проверь интернет и попробуй ещё раз.'));
     }
 
-    const body = h('div', { class: 'stack' },
-      h('button', { class: 'btn primary wide', type: 'button', onclick: stockNewReport }, 'Новый отчёт'),
-      state.me.is_admin && h('button', { class: 'btn wide', type: 'button', onclick: stockAdmin }, 'Плёнки и точки'),
-      h('h4', null, state.me.is_admin ? 'Отчёты' : 'Мои отчёты'));
+    const body = h('div', { class: 'stack' });
 
     if (!reports.length) {
       body.append(h('p', { class: 'muted' }, 'Отчётов пока нет.'));
@@ -1198,7 +1188,7 @@
       body.append(h('div', { class: 'people' }, reports.map((report) => {
         const diffs = report.stock_lines.filter((line) => lineDiff(line) !== 0).length;
         const transit = report.stock_lines.reduce((sum, line) => sum + line.in_transit, 0);
-        return h('button', { class: 'row', type: 'button', onclick: () => stockReport(report.id) },
+        return h('button', { class: 'row', type: 'button', onclick: () => stockReport(report.id, stockHome) },
           h('span', { class: 'row-main' },
             h('strong', null, pointName(report.point_id)),
             h('span', { class: 'preview' }, `${nameOf(report.author_id)} · ${dateTimeFmt.format(new Date(report.created_at))}`)),
@@ -1207,7 +1197,7 @@
             h('span', { class: `tag ${diffs ? 'bad' : 'good'}` }, diffs ? `расхождений ${diffs}` : 'сошлось')));
       })));
     }
-    appView('Учёт плёнок', appsModal, body);
+    appView('Отчёты по плёнкам', back, body);
   }
 
   function readDraft() {
@@ -1217,13 +1207,27 @@
     try { localStorage.setItem(DRAFT_KEY, JSON.stringify(draft)); } catch (error) { /* черновик не обязателен */ }
   }
 
-  function stockNewReport() {
+  // Форма открывается кнопкой в чате, готовый отчёт уходит сообщением в этот же чат.
+  async function stockNewReport() {
+    const chatId = state.chatId;
+    if (!chatId) return;
+    const title = 'Отчёт по плёнкам';
+    appView(title, null, h('p', { class: 'muted' }, 'Загрузка…'));
+    try {
+      await stockLoadRefs();
+    } catch (error) {
+      return appView(title, null, h('p', { class: 'error' }, 'Не получилось загрузить. Проверь интернет и попробуй ещё раз.'));
+    }
+    const adminTools = state.me.is_admin && h('div', { class: 'inline' },
+      h('button', { class: 'btn small', type: 'button', onclick: stockHome }, 'Все отчёты'),
+      h('button', { class: 'btn small', type: 'button', onclick: stockAdmin }, 'Плёнки и точки'));
+
     const points = stock.points.filter((p) => p.active);
     const items = stock.items.filter((i) => i.active);
     if (!points.length || !items.length) {
-      return appView('Новый отчёт', stockHome, h('p', { class: 'muted' }, state.me.is_admin
-        ? 'Сначала добавь точки и плёнки: вернись назад и открой «Плёнки и точки».'
-        : 'Администратор ещё не добавил точки или плёнки. Напиши ему.'));
+      return appView(title, null, h('div', { class: 'stack' }, adminTools, h('p', { class: 'muted' }, state.me.is_admin
+        ? 'Сначала добавь точки и плёнки: кнопка «Плёнки и точки» выше.'
+        : 'Администратор ещё не добавил точки или плёнки. Напиши ему.')));
     }
 
     // Черновик хранится на устройстве: если случайно закрыть окно, введённое не пропадёт.
@@ -1274,34 +1278,38 @@
       if (lines.length < items.length && !confirm(`Заполнено ${lines.length} из ${items.length} плёнок. Отправить так?`)) return;
 
       send.disabled = true;
-      const { data, error } = await sb.rpc('submit_stock_report', { p_point: point.value, p_comment: comment.value, p_lines: lines });
+      const { data, error } = await sb.rpc('submit_stock_report', { p_chat: chatId, p_point: point.value, p_comment: comment.value, p_lines: lines });
       send.disabled = false;
       if (error) return toast('Отчёт не отправился. Проверь интернет и попробуй ещё раз.');
       try { localStorage.removeItem(DRAFT_KEY); } catch (e) { /* не страшно */ }
-      for (const id of data.message_ids || []) notifyPush(id);
-      toast('Отчёт отправлен');
-      stockReport(data.report_id);
+      closeModal();
+      toast('Отчёт отправлен в чат');
+      notifyPush(data.message_id);
+      // Сообщение обычно прилетает само; на случай обрыва связи подтягиваем его вручную.
+      const { data: message } = await sb.from('messages').select('*').eq('id', data.message_id).maybeSingle();
+      if (message) { upsertMessage(message); touchChat(message); }
     });
 
-    appView('Новый отчёт', stockHome, h('div', { class: 'stack' },
+    appView(title, null, h('div', { class: 'stack' },
+      adminTools,
       point,
       h('div', { class: 'stock-list' }, rows),
       comment,
       send));
   }
 
-  async function stockReport(id) {
-    appView('Отчёт', stockHome, h('p', { class: 'muted' }, 'Загрузка…'));
+  async function stockReport(id, back = null) {
+    appView('Отчёт', back, h('p', { class: 'muted' }, 'Загрузка…'));
     let report;
     try {
-      if (!stock.items.length) await stockLoadRefs();
+      await stockLoadRefs();
       const { data, error } = await sb.from('stock_reports').select('*, stock_lines(*)').eq('id', id).maybeSingle();
       if (error) throw error;
       report = data;
     } catch (error) {
-      return appView('Отчёт', stockHome, h('p', { class: 'error' }, 'Не получилось загрузить отчёт.'));
+      return appView('Отчёт', back, h('p', { class: 'error' }, 'Не получилось загрузить отчёт.'));
     }
-    if (!report) return appView('Отчёт', stockHome, h('p', { class: 'muted' }, 'Отчёт не найден или у тебя нет к нему доступа.'));
+    if (!report) return appView('Отчёт', back, h('p', { class: 'muted' }, 'Отчёт не найден или у тебя нет к нему доступа.'));
 
     const order = new Map(stock.items.map((item, index) => [item.id, index]));
     const lines = report.stock_lines.slice().sort((a, b) => (order.get(a.item_id) || 0) - (order.get(b.item_id) || 0));
@@ -1362,7 +1370,7 @@
     });
     draw();
 
-    appView(pointName(report.point_id), stockHome, h('div', { class: 'stack' },
+    appView(pointName(report.point_id), back, h('div', { class: 'stack' },
       h('p', { class: 'muted' }, `${nameOf(report.author_id)} · ${dateTimeFmt.format(new Date(report.created_at))}`),
       report.comment && h('p', { class: 'stock-comment' }, report.comment),
       summary,
@@ -1387,7 +1395,7 @@
       },
     }, row.active ? 'Скрыть' : 'Вернуть');
 
-    appView('Плёнки и точки', stockHome, h('div', { class: 'stack' },
+    appView('Плёнки и точки', () => stockNewReport(), h('div', { class: 'stack' },
       h('h4', null, 'Точки'),
       h('div', { class: 'inline' }, pointInput, h('button', {
         class: 'btn', type: 'button',
@@ -1701,7 +1709,7 @@
 
     $('me-btn').addEventListener('click', settingsModal);
     $('new-chat-btn').addEventListener('click', newChatModal);
-    $('apps-btn').addEventListener('click', appsModal);
+    $('report-btn').addEventListener('click', stockNewReport);
     $('chat-search').addEventListener('input', (event) => { state.search = event.target.value; renderChatList(); });
     $('chat-head').addEventListener('click', chatInfoModal);
     $('back-btn').addEventListener('click', () => {

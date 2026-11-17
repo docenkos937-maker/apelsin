@@ -171,6 +171,7 @@ input:focus, textarea:focus { border-color: var(--accent); }
 .icon-btn.send { background: var(--accent); color: #1c1005; }
 .icon-btn.send:hover { background: var(--accent-strong); color: #1c1005; }
 .icon-btn.send svg { fill: currentColor; stroke: none; }
+.composer .icon-btn:not(.send) { width: 38px; }
 .back { display: none; }
 
 .search { flex: none; padding: 10px 12px; }
@@ -448,7 +449,6 @@ button.row:hover { background: var(--bg); }
 
 /* ───── Мини-приложения ───── */
 
-.app-icon { background: var(--accent-soft); font-size: 22px; }
 .back-link { align-self: flex-start; min-height: 36px; padding: 4px 0; }
 .card-btn { display: block; margin-top: 8px; background: var(--panel); }
 .row.off strong { color: var(--muted); }
