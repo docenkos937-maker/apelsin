@@ -457,3 +457,146 @@ create policy chat_files_select on storage.objects for select to authenticated
 drop policy if exists chat_files_insert on storage.objects;
 create policy chat_files_insert on storage.objects for insert to authenticated
   with check (bucket_id = 'chat-files' and public.is_member_of_path(name));
+
+-- ───────────────────────── Мини-приложение «Учёт плёнок» ─────────────────────────
+-- Продавец вносит по каждой плёнке базу и факт, администратор смотрит расхождения
+-- и сам проставляет, сколько штук сейчас в пути.
+
+create table if not exists public.stock_items (
+  id         uuid primary key default gen_random_uuid(),
+  code       text not null check (char_length(code) between 1 and 40),
+  name       text not null check (char_length(name) between 1 and 120),
+  sort       int not null default 0,
+  active     boolean not null default true,
+  created_at timestamptz not null default now()
+);
+
+create table if not exists public.stock_points (
+  id         uuid primary key default gen_random_uuid(),
+  name       text not null unique check (char_length(name) between 1 and 60),
+  active     boolean not null default true,
+  created_at timestamptz not null default now()
+);
+
+create table if not exists public.stock_reports (
+  id         uuid primary key default gen_random_uuid(),
+  point_id   uuid not null references public.stock_points (id),
+  author_id  uuid references public.profiles (id) on delete set null,
+  comment    text not null default '' check (char_length(comment) <= 1000),
+  created_at timestamptz not null default now()
+);
+create index if not exists stock_reports_created_idx on public.stock_reports (created_at desc);
+
+create table if not exists public.stock_lines (
+  report_id  uuid not null references public.stock_reports (id) on delete cascade,
+  item_id    uuid not null references public.stock_items (id),
+  base       int not null check (base between 0 and 100000),
+  fact       int not null check (fact between 0 and 100000),
+  in_transit int not null default 0 check (in_transit between 0 and 100000),
+  comment    text not null default '' check (char_length(comment) <= 300),
+  primary key (report_id, item_id)
+);
+
+-- Сообщение-уведомление в чате ссылается на отчёт, чтобы его можно было открыть одной кнопкой.
+alter table public.messages
+  add column if not exists report_id uuid references public.stock_reports (id) on delete set null;
+
+alter table public.stock_items   enable row level security;
+alter table public.stock_points  enable row level security;
+alter table public.stock_reports enable row level security;
+alter table public.stock_lines   enable row level security;
+
+grant select on public.stock_items, public.stock_points, public.stock_reports, public.stock_lines to authenticated;
+grant insert, update on public.stock_items, public.stock_points to authenticated;
+grant update (in_transit) on public.stock_lines to authenticated;
+
+create or replace function public.can_see_report(p_report uuid) returns boolean
+language sql stable security definer set search_path = public as $$
+  select public.is_admin() or exists (
+    select 1 from stock_reports r
+    where r.id = p_report and r.author_id = auth.uid() and public.is_active()
+  );
+$$;
+
+drop policy if exists stock_items_select on public.stock_items;
+create policy stock_items_select on public.stock_items for select to authenticated
+  using (public.is_active());
+drop policy if exists stock_items_insert on public.stock_items;
+create policy stock_items_insert on public.stock_items for insert to authenticated
+  with check (public.is_admin());
+drop policy if exists stock_items_update on public.stock_items;
+create policy stock_items_update on public.stock_items for update to authenticated
+  using (public.is_admin()) with check (public.is_admin());
+
+drop policy if exists stock_points_select on public.stock_points;
+create policy stock_points_select on public.stock_points for select to authenticated
+  using (public.is_active());
+drop policy if exists stock_points_insert on public.stock_points;
+create policy stock_points_insert on public.stock_points for insert to authenticated
+  with check (public.is_admin());
+drop policy if exists stock_points_update on public.stock_points;
+create policy stock_points_update on public.stock_points for update to authenticated
+  using (public.is_admin()) with check (public.is_admin());
+
+drop policy if exists stock_reports_select on public.stock_reports;
+create policy stock_reports_select on public.stock_reports for select to authenticated
+  using (public.can_see_report(id));
+
+drop policy if exists stock_lines_select on public.stock_lines;
+create policy stock_lines_select on public.stock_lines for select to authenticated
+  using (public.can_see_report(report_id));
+drop policy if exists stock_lines_update on public.stock_lines;
+create policy stock_lines_update on public.stock_lines for update to authenticated
+  using (public.is_admin()) with check (public.is_admin());
+
+-- Отправка отчёта: сохраняет строки и пишет каждому администратору сообщение в личный чат.
+-- p_lines: [{"item_id": "...", "base": 10, "fact": 9, "comment": "..."}]
+create or replace function public.submit_stock_report(p_point uuid, p_comment text, p_lines jsonb) returns json
+language plpgsql security definer set search_path = public as $$
+declare
+  v_me       uuid := auth.uid();
+  v_point    text;
+  v_report   uuid;
+  v_total    int;
+  v_diffs    int;
+  v_admin    uuid;
+  v_chat     uuid;
+  v_message  uuid;
+  v_messages uuid[] := '{}';
+  v_text     text;
+begin
+  if not public.is_active() then raise exception 'NOT_ALLOWED'; end if;
+  select name into v_point from stock_points where id = p_point and active;
+  if v_point is null then raise exception 'POINT_NOT_FOUND'; end if;
+
+  insert into stock_reports (point_id, author_id, comment)
+  values (p_point, v_me, left(trim(coalesce(p_comment, '')), 1000))
+  returning id into v_report;
+
+  insert into stock_lines (report_id, item_id, base, fact, comment)
+  select v_report, i.id, x.base, x.fact, left(trim(coalesce(x.comment, '')), 300)
+  from jsonb_to_recordset(coalesce(p_lines, '[]'::jsonb)) as x(item_id uuid, base int, fact int, comment text)
+  join stock_items i on i.id = x.item_id and i.active
+  where x.base is not null and x.fact is not null;
+
+  select count(*), count(*) filter (where base <> fact) into v_total, v_diffs
+  from stock_lines where report_id = v_report;
+  if v_total = 0 then raise exception 'NO_LINES'; end if;
+
+  v_text := '📋 Учёт плёнок, ' || v_point || ': '
+    || case when v_diffs = 0 then 'расхождений нет' else 'расхождений: ' || v_diffs end
+    || ' (позиций: ' || v_total || ')';
+
+  for v_admin in select id from profiles where is_admin and not blocked and id <> v_me loop
+    v_chat := public.start_direct(v_admin);
+    insert into messages (chat_id, body, report_id) values (v_chat, v_text, v_report)
+    returning id into v_message;
+    v_messages := v_messages || v_message;
+  end loop;
+
+  return json_build_object('report_id', v_report, 'message_ids', v_messages);
+end;
+$$;
+
+revoke execute on function public.can_see_report(uuid), public.submit_stock_report(uuid, text, jsonb) from public, anon;
+grant execute on function public.can_see_report(uuid), public.submit_stock_report(uuid, text, jsonb) to authenticated;

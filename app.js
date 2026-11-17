@@ -476,6 +476,10 @@
 
     if (message.body) bubble.append(h('div', { class: 'text' }, linkify(message.body)));
 
+    if (message.report_id) {
+      bubble.append(h('button', { class: 'btn small card-btn', type: 'button', onclick: () => stockReport(message.report_id) }, 'Открыть отчёт'));
+    }
+
     const meta = h('span', { class: 'meta' });
     if (message.failed) meta.append('не отправлено · повторить');
     else if (message.pending) meta.append(message.file_name ? 'загрузка…' : 'отправка…');
@@ -1130,6 +1134,295 @@
     openModal('Настройки', body);
   }
 
+  // ───────────────────────── Мини-приложения ─────────────────────────
+
+  function appsModal() {
+    openModal('Приложения', h('div', { class: 'people' },
+      h('button', { class: 'row', type: 'button', onclick: stockHome },
+        h('span', { class: 'avatar group app-icon', 'aria-hidden': 'true' }, '📋'),
+        h('span', { class: 'row-main' },
+          h('strong', null, 'Учёт плёнок'),
+          h('span', { class: 'preview' }, state.me.is_admin ? 'Отчёты точек: база, факт, расхождения' : 'Внести базу и факт по плёнкам')))));
+  }
+
+  // Экран мини-приложения: заголовок, кнопка «Назад» и содержимое.
+  function appView(title, back, content) {
+    openModal(title, h('div', { class: 'stack' },
+      back && h('button', { class: 'btn link back-link', type: 'button', onclick: back }, '← Назад'),
+      content));
+  }
+
+  // ───────────────────────── Учёт плёнок ─────────────────────────
+
+  const DRAFT_KEY = 'apelsin-stock-draft';
+  const stock = { items: [], points: [] };
+  const dateTimeFmt = new Intl.DateTimeFormat('ru', { day: 'numeric', month: 'long', hour: '2-digit', minute: '2-digit' });
+
+  async function stockLoadRefs() {
+    const [items, points] = await Promise.all([
+      sb.from('stock_items').select('*').order('sort').order('code'),
+      sb.from('stock_points').select('*').order('name'),
+    ]);
+    if (items.error || points.error) throw items.error || points.error;
+    stock.items = items.data;
+    stock.points = points.data;
+  }
+
+  // Расхождение строки: сколько не хватает (минус) или лишнее (плюс) с учётом того, что ещё едет.
+  const lineDiff = (line) => line.fact + line.in_transit - line.base;
+  const signed = (n) => (n > 0 ? '+' + n : String(n).replace('-', '−'));
+  const pointName = (id) => (stock.points.find((p) => p.id === id) || { name: 'Точка' }).name;
+
+  async function stockHome() {
+    appView('Учёт плёнок', appsModal, h('p', { class: 'muted' }, 'Загрузка…'));
+    let reports;
+    try {
+      await stockLoadRefs();
+      const { data, error } = await sb.from('stock_reports')
+        .select('id, point_id, author_id, comment, created_at, stock_lines(base, fact, in_transit)')
+        .order('created_at', { ascending: false }).limit(60);
+      if (error) throw error;
+      reports = data;
+    } catch (error) {
+      return appView('Учёт плёнок', appsModal, h('p', { class: 'error' }, 'Не получилось загрузить. Проверь интернет и попробуй ещё раз.'));
+    }
+
+    const body = h('div', { class: 'stack' },
+      h('button', { class: 'btn primary wide', type: 'button', onclick: stockNewReport }, 'Новый отчёт'),
+      state.me.is_admin && h('button', { class: 'btn wide', type: 'button', onclick: stockAdmin }, 'Плёнки и точки'),
+      h('h4', null, state.me.is_admin ? 'Отчёты' : 'Мои отчёты'));
+
+    if (!reports.length) {
+      body.append(h('p', { class: 'muted' }, 'Отчётов пока нет.'));
+    } else {
+      body.append(h('div', { class: 'people' }, reports.map((report) => {
+        const diffs = report.stock_lines.filter((line) => lineDiff(line) !== 0).length;
+        const transit = report.stock_lines.reduce((sum, line) => sum + line.in_transit, 0);
+        return h('button', { class: 'row', type: 'button', onclick: () => stockReport(report.id) },
+          h('span', { class: 'row-main' },
+            h('strong', null, pointName(report.point_id)),
+            h('span', { class: 'preview' }, `${nameOf(report.author_id)} · ${dateTimeFmt.format(new Date(report.created_at))}`)),
+          h('span', { class: 'tags' },
+            transit > 0 && h('span', { class: 'tag transit' }, `в пути ${transit}`),
+            h('span', { class: `tag ${diffs ? 'bad' : 'good'}` }, diffs ? `расхождений ${diffs}` : 'сошлось')));
+      })));
+    }
+    appView('Учёт плёнок', appsModal, body);
+  }
+
+  function readDraft() {
+    try { return JSON.parse(localStorage.getItem(DRAFT_KEY)) || {}; } catch (error) { return {}; }
+  }
+  function writeDraft(draft) {
+    try { localStorage.setItem(DRAFT_KEY, JSON.stringify(draft)); } catch (error) { /* черновик не обязателен */ }
+  }
+
+  function stockNewReport() {
+    const points = stock.points.filter((p) => p.active);
+    const items = stock.items.filter((i) => i.active);
+    if (!points.length || !items.length) {
+      return appView('Новый отчёт', stockHome, h('p', { class: 'muted' }, state.me.is_admin
+        ? 'Сначала добавь точки и плёнки: вернись назад и открой «Плёнки и точки».'
+        : 'Администратор ещё не добавил точки или плёнки. Напиши ему.'));
+    }
+
+    // Черновик хранится на устройстве: если случайно закрыть окно, введённое не пропадёт.
+    const draft = readDraft();
+    draft.lines = draft.lines || {};
+    const save = () => writeDraft(draft);
+    const digits = (input) => { input.value = input.value.replace(/\D/g, '').slice(0, 6); };
+
+    const point = h('select', { 'aria-label': 'Точка' },
+      h('option', { value: '' }, 'Выбери точку'),
+      points.map((p) => h('option', { value: p.id }, p.name)));
+    if (points.some((p) => p.id === draft.point)) point.value = draft.point;
+    point.addEventListener('change', () => { draft.point = point.value; save(); });
+
+    const rows = items.map((item) => {
+      const line = draft.lines[item.id] || (draft.lines[item.id] = { base: '', fact: '', comment: '' });
+      const field = (key, label) => {
+        const input = h('input', { type: 'text', inputmode: 'numeric', autocomplete: 'off', placeholder: label, 'aria-label': `${label}, ${item.name}`, value: line[key] });
+        input.addEventListener('input', () => { digits(input); line[key] = input.value; save(); });
+        return h('label', { class: 'fld' }, h('small', null, label), input);
+      };
+      const comment = h('input', { type: 'text', maxlength: '300', placeholder: 'если нужно', 'aria-label': `Комментарий, ${item.name}`, value: line.comment });
+      comment.addEventListener('input', () => { line.comment = comment.value; save(); });
+      return h('div', { class: 'stock-row' },
+        h('div', { class: 'stock-name' }, h('span', { class: 'code' }, item.code), ' ', item.name),
+        h('div', { class: 'stock-inputs' }, field('base', 'База'), field('fact', 'Факт'),
+          h('label', { class: 'fld' }, h('small', null, 'Комментарий'), comment)));
+    });
+
+    const comment = h('textarea', { rows: '2', maxlength: '1000', placeholder: 'Общий комментарий к отчёту (необязательно)', 'aria-label': 'Общий комментарий' });
+    comment.value = draft.comment || '';
+    comment.addEventListener('input', () => { draft.comment = comment.value; save(); });
+
+    const send = h('button', { class: 'btn primary wide', type: 'button' }, 'Отправить отчёт');
+    send.addEventListener('click', async () => {
+      if (!point.value) { point.focus(); return toast('Выбери точку.'); }
+      const lines = [];
+      for (const item of items) {
+        const line = draft.lines[item.id];
+        if (line.base === '' && line.fact === '') {
+          if (line.comment.trim()) return toast(`«${item.name}»: есть комментарий, но нет базы и факта.`);
+          continue;
+        }
+        if (line.base === '' || line.fact === '') return toast(`«${item.name}»: заполни и базу, и факт.`);
+        lines.push({ item_id: item.id, base: Number(line.base), fact: Number(line.fact), comment: line.comment.trim() });
+      }
+      if (!lines.length) return toast('Заполни базу и факт хотя бы по одной плёнке.');
+      if (lines.length < items.length && !confirm(`Заполнено ${lines.length} из ${items.length} плёнок. Отправить так?`)) return;
+
+      send.disabled = true;
+      const { data, error } = await sb.rpc('submit_stock_report', { p_point: point.value, p_comment: comment.value, p_lines: lines });
+      send.disabled = false;
+      if (error) return toast('Отчёт не отправился. Проверь интернет и попробуй ещё раз.');
+      try { localStorage.removeItem(DRAFT_KEY); } catch (e) { /* не страшно */ }
+      for (const id of data.message_ids || []) notifyPush(id);
+      toast('Отчёт отправлен');
+      stockReport(data.report_id);
+    });
+
+    appView('Новый отчёт', stockHome, h('div', { class: 'stack' },
+      point,
+      h('div', { class: 'stock-list' }, rows),
+      comment,
+      send));
+  }
+
+  async function stockReport(id) {
+    appView('Отчёт', stockHome, h('p', { class: 'muted' }, 'Загрузка…'));
+    let report;
+    try {
+      if (!stock.items.length) await stockLoadRefs();
+      const { data, error } = await sb.from('stock_reports').select('*, stock_lines(*)').eq('id', id).maybeSingle();
+      if (error) throw error;
+      report = data;
+    } catch (error) {
+      return appView('Отчёт', stockHome, h('p', { class: 'error' }, 'Не получилось загрузить отчёт.'));
+    }
+    if (!report) return appView('Отчёт', stockHome, h('p', { class: 'muted' }, 'Отчёт не найден или у тебя нет к нему доступа.'));
+
+    const order = new Map(stock.items.map((item, index) => [item.id, index]));
+    const lines = report.stock_lines.slice().sort((a, b) => (order.get(a.item_id) || 0) - (order.get(b.item_id) || 0));
+    const admin = state.me.is_admin;
+    let onlyDiffs = false;
+
+    const summary = h('p', { class: 'stock-summary' });
+    const list = h('div', { class: 'stock-list' });
+    const filter = h('button', { class: 'btn small', type: 'button', 'aria-pressed': 'false' }, 'Только расхождения');
+
+    function drawSummary() {
+      const diffs = lines.filter((line) => lineDiff(line) !== 0).length;
+      const transit = lines.reduce((sum, line) => sum + line.in_transit, 0);
+      summary.replaceChildren(...[
+        h('span', { class: `tag ${diffs ? 'bad' : 'good'}` }, diffs ? `расхождений ${diffs} из ${lines.length}` : `всё сошлось, позиций ${lines.length}`),
+        transit > 0 && h('span', { class: 'tag transit' }, `в пути ${transit} шт.`),
+      ].filter(Boolean));
+    }
+
+    function draw() {
+      drawSummary();
+      const shown = lines.filter((line) => !onlyDiffs || lineDiff(line) !== 0);
+      list.replaceChildren(...shown.map((line) => {
+        const item = stock.items.find((i) => i.id === line.item_id) || { code: '', name: 'Плёнка' };
+        const diff = lineDiff(line);
+        const diffEl = h('span', { class: `diff ${diff < 0 ? 'bad' : diff > 0 ? 'over' : 'good'}` }, diff === 0 ? '✓' : signed(diff));
+        let transit;
+        if (admin) {
+          transit = h('input', { type: 'text', inputmode: 'numeric', autocomplete: 'off', 'aria-label': `В пути, ${item.name}`, value: line.in_transit ? String(line.in_transit) : '', placeholder: '0' });
+          transit.addEventListener('change', async () => {
+            const value = Math.min(100000, Number(transit.value.replace(/\D/g, '')) || 0);
+            const before = line.in_transit;
+            line.in_transit = value;
+            draw();
+            const { error } = await sb.from('stock_lines').update({ in_transit: value }).eq('report_id', report.id).eq('item_id', line.item_id);
+            if (error) { line.in_transit = before; draw(); toast('Не получилось сохранить «в пути».'); }
+          });
+        } else {
+          transit = h('b', null, String(line.in_transit));
+        }
+        return h('div', { class: `stock-row${diff !== 0 ? ' has-diff' : ''}` },
+          h('div', { class: 'stock-name' }, h('span', { class: 'code' }, item.code), ' ', item.name),
+          h('div', { class: 'stock-cells' },
+            h('span', { class: 'cell' }, h('small', null, 'База'), h('b', null, String(line.base))),
+            h('span', { class: 'cell' }, h('small', null, 'Факт'), h('b', null, String(line.fact))),
+            (admin || line.in_transit > 0) && h('label', { class: 'cell' }, h('small', null, 'В пути'), transit),
+            h('span', { class: 'cell' }, h('small', null, 'Итог'), diffEl)),
+          line.comment && h('div', { class: 'stock-comment' }, line.comment));
+      }));
+      if (!shown.length) list.append(h('p', { class: 'muted' }, 'Расхождений нет.'));
+    }
+
+    filter.addEventListener('click', () => {
+      onlyDiffs = !onlyDiffs;
+      filter.setAttribute('aria-pressed', String(onlyDiffs));
+      filter.classList.toggle('on', onlyDiffs);
+      draw();
+    });
+    draw();
+
+    appView(pointName(report.point_id), stockHome, h('div', { class: 'stack' },
+      h('p', { class: 'muted' }, `${nameOf(report.author_id)} · ${dateTimeFmt.format(new Date(report.created_at))}`),
+      report.comment && h('p', { class: 'stock-comment' }, report.comment),
+      summary,
+      h('div', null, filter),
+      admin && h('p', { class: 'hint' }, 'Итог = факт + в пути − база. Впиши, сколько штук едет на точку, и они перестанут считаться недостачей.'),
+      list));
+  }
+
+  async function stockAdmin() {
+    try { await stockLoadRefs(); } catch (error) { return toast('Не получилось загрузить.'); }
+
+    const pointInput = h('input', { type: 'text', maxlength: '60', placeholder: 'Название точки', 'aria-label': 'Название точки' });
+    const codeInput = h('input', { type: 'text', maxlength: '40', placeholder: 'Код', 'aria-label': 'Код плёнки', class: 'code-input' });
+    const nameInput = h('input', { type: 'text', maxlength: '120', placeholder: 'Название плёнки', 'aria-label': 'Название плёнки' });
+
+    const toggle = (table, row) => h('button', {
+      class: 'btn small', type: 'button',
+      onclick: async () => {
+        const { error } = await sb.from(table).update({ active: !row.active }).eq('id', row.id);
+        if (error) return toast('Не получилось изменить.');
+        stockAdmin();
+      },
+    }, row.active ? 'Скрыть' : 'Вернуть');
+
+    appView('Плёнки и точки', stockHome, h('div', { class: 'stack' },
+      h('h4', null, 'Точки'),
+      h('div', { class: 'inline' }, pointInput, h('button', {
+        class: 'btn', type: 'button',
+        onclick: async () => {
+          const name = pointInput.value.trim();
+          if (!name) return pointInput.focus();
+          const { error } = await sb.from('stock_points').insert({ name });
+          if (error) return toast(/duplicate|unique/i.test(error.message) ? 'Такая точка уже есть.' : 'Не получилось добавить.');
+          stockAdmin();
+        },
+      }, 'Добавить')),
+      h('div', { class: 'people' }, stock.points.map((p) => h('div', { class: `row static${p.active ? '' : ' off'}` },
+        h('span', { class: 'row-main' }, h('strong', null, p.name), !p.active && h('span', { class: 'preview' }, 'скрыта')),
+        toggle('stock_points', p)))),
+      h('h4', null, 'Плёнки'),
+      h('div', { class: 'inline' }, codeInput, nameInput),
+      h('button', {
+        class: 'btn wide', type: 'button',
+        onclick: async () => {
+          const code = codeInput.value.trim();
+          const name = nameInput.value.trim();
+          if (!code) return codeInput.focus();
+          if (!name) return nameInput.focus();
+          const sort = stock.items.reduce((max, item) => Math.max(max, item.sort), 0) + 1;
+          const { error } = await sb.from('stock_items').insert({ code, name, sort });
+          if (error) return toast('Не получилось добавить.');
+          stockAdmin();
+        },
+      }, 'Добавить плёнку'),
+      h('p', { class: 'muted' }, 'Скрытая плёнка или точка пропадает из новых отчётов, но остаётся в старых.'),
+      h('div', { class: 'people' }, stock.items.map((item) => h('div', { class: `row static${item.active ? '' : ' off'}` },
+        h('span', { class: 'row-main' }, h('strong', null, item.name), h('span', { class: 'preview' }, item.code + (item.active ? '' : ' · скрыта'))),
+        toggle('stock_items', item))))));
+  }
+
   // ───────────────────────── Уведомления ─────────────────────────
 
   function keyBytes(text) {
@@ -1408,6 +1701,7 @@
 
     $('me-btn').addEventListener('click', settingsModal);
     $('new-chat-btn').addEventListener('click', newChatModal);
+    $('apps-btn').addEventListener('click', appsModal);
     $('chat-search').addEventListener('input', (event) => { state.search = event.target.value; renderChatList(); });
     $('chat-head').addEventListener('click', chatInfoModal);
     $('back-btn').addEventListener('click', () => {

@@ -446,6 +446,56 @@ button.row:hover { background: var(--bg); }
   box-shadow: var(--shadow);
 }
 
+/* ───── Мини-приложения ───── */
+
+.app-icon { background: var(--accent-soft); font-size: 22px; }
+.back-link { align-self: flex-start; min-height: 36px; padding: 4px 0; }
+.card-btn { display: block; margin-top: 8px; background: var(--panel); }
+.row.off strong { color: var(--muted); }
+
+select, .modal textarea {
+  width: 100%;
+  min-height: 44px;
+  padding: 10px 14px;
+  background: var(--bg);
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  outline: none;
+  font: inherit;
+  color: inherit;
+}
+.modal textarea { resize: vertical; }
+select:focus { border-color: var(--accent); }
+
+.tags { flex: none; display: flex; flex-direction: column; align-items: flex-end; gap: 4px; }
+.tag { padding: 2px 9px; border-radius: 10px; font-size: 12px; font-weight: 600; white-space: nowrap; }
+.tag.good { background: color-mix(in srgb, var(--online) 16%, transparent); color: var(--online); }
+.tag.bad { background: color-mix(in srgb, var(--danger) 14%, transparent); color: var(--danger); }
+.tag.transit { background: var(--accent-soft); color: var(--accent-strong); }
+
+.stock-list { display: flex; flex-direction: column; gap: 8px; }
+.stock-row { padding: 10px 12px; border: 1px solid var(--line); border-radius: 14px; display: flex; flex-direction: column; gap: 8px; }
+.stock-row.has-diff { border-color: color-mix(in srgb, var(--danger) 55%, var(--line)); }
+.stock-name { font-weight: 600; overflow-wrap: anywhere; }
+.code { color: var(--muted); font-weight: 500; font-variant-numeric: tabular-nums; }
+.stock-inputs { display: grid; grid-template-columns: 72px 72px minmax(0, 1fr); gap: 6px; }
+.stock-inputs input { padding: 8px 10px; min-height: 42px; }
+.fld { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
+.fld small { font-size: 11px; color: var(--muted); padding-left: 2px; }
+.stock-cells { display: flex; gap: 6px; }
+.cell { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; padding: 6px 8px; background: var(--bg); border-radius: 10px; font-variant-numeric: tabular-nums; }
+.cell small { font-size: 11px; color: var(--muted); }
+.cell b { font-size: 17px; }
+.cell input { min-height: 28px; padding: 2px 6px; font-weight: 700; font-size: 16px; background: var(--panel); border-radius: 8px; }
+.diff { font-size: 17px; font-weight: 700; }
+.diff.good { color: var(--online); }
+.diff.bad { color: var(--danger); }
+.diff.over { color: var(--accent-strong); }
+.stock-comment { font-size: 14px; color: var(--muted); white-space: pre-wrap; overflow-wrap: anywhere; }
+.stock-summary { display: flex; flex-wrap: wrap; gap: 6px; }
+.btn.small.on { background: var(--accent); border-color: var(--accent); color: #1c1005; }
+.code-input { flex: 0 0 110px !important; }
+
 /* ───── Телефон: один экран за раз ───── */
 
 @media (max-width: 760px) {
