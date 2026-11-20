@@ -67,6 +67,10 @@ create table if not exists public.push_subscriptions (
 );
 create index if not exists push_subscriptions_user_idx on public.push_subscriptions (user_id);
 
+-- Ответ на сообщение: ссылка на исходное. Если исходное удалят, ответ останется без цитаты.
+alter table public.messages
+  add column if not exists reply_to uuid references public.messages (id) on delete set null;
+
 -- ───────────────────────── Вспомогательные проверки ─────────────────────────
 
 create or replace function public.is_active() returns boolean

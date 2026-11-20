@@ -29,6 +29,8 @@
 
   const ICONS = {
     close: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"/></svg>',
+    download: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 4v11M7 10.5l5 5 5-5M5 20h14"/></svg>',
+    reply: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M10 7L5 12l5 5M5 12h9a5 5 0 015 5v1"/></svg>',
     down: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 9l6 6 6-6"/></svg>',
     file: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M14 3H7a2 2 0 00-2 2v14a2 2 0 002 2h10a2 2 0 002-2V8l-5-5zM14 3v5h5"/></svg>',
   };
@@ -51,6 +53,7 @@
     drafts: new Map(),
     pushOn: false,
     pushFailures: 0,
+    replyTo: null,
   };
 
   let sb = null;
@@ -405,6 +408,7 @@
     $('chat-empty').hidden = true;
     $('chat-body').hidden = false;
     $('message-input').value = state.drafts.get(id) || '';
+    clearReply();
     autosize();
     renderChatHeader();
     renderChatList();
@@ -431,6 +435,7 @@
 
   function closeChat() {
     if (state.chatId) state.drafts.set(state.chatId, $('message-input').value);
+    clearReply();
     state.chatId = null;
     state.messages = [];
     $('main').classList.remove('open');
@@ -454,10 +459,12 @@
       bubble.append(h('div', { class: 'sender', style: `color:${colorFor(message.sender_id || '')}` }, nameOf(message.sender_id)));
     }
 
+    if (message.reply_to) bubble.append(quoteEl(message.reply_to));
+
     if (message.file_path || message.localUrl) {
       if ((message.file_type || '').startsWith('image/')) {
         const img = h('img', { class: 'photo', alt: message.file_name || 'Фото', loading: 'lazy' });
-        img.addEventListener('load', () => { if (stickToBottom) scrollToBottom(); });
+        img.addEventListener('load', () => { img.classList.add('loaded'); if (stickToBottom) scrollToBottom(); });
         img.addEventListener('click', () => openViewer(img.src, message));
         if (message.localUrl) img.src = message.localUrl;
         else signedUrl(message.file_path).then((url) => { img.src = url; }).catch(() => { img.alt = 'Фото не загрузилось'; });
@@ -608,6 +615,7 @@
         file_name: message.file_name || null,
         file_type: message.file_type || null,
         file_size: message.file_size || null,
+        reply_to: message.reply_to || null,
       }).select().single();
       if (error) throw error;
       upsertMessage(data);
@@ -644,7 +652,7 @@
     input.value = '';
     state.drafts.delete(state.chatId);
     autosize();
-    deliver(newMessage({ body: text }));
+    deliver(newMessage({ body: text, reply_to: takeReply() }));
     if (!isTouch()) input.focus();
   }
 
@@ -690,6 +698,7 @@
       const ext = (/\.([a-z0-9]{1,8})$/i.exec(file.name || '') || [])[1];
       const message = newMessage({
         body: caption,
+        reply_to: takeReply(),
         file_name: (file.name || 'file').slice(0, 200),
         file_type: type,
         file_size: file.size,
@@ -759,14 +768,189 @@
     setTimeout(() => URL.revokeObjectURL(url), 60000);
   }
 
+  // Просмотр фото на весь экран. Увеличивается только сама картинка (двумя пальцами, двойным
+  // нажатием или колёсиком мыши), а не вся страница.
   function openViewer(src, message) {
     const viewer = $('viewer');
-    viewer.replaceChildren(
-      h('img', { src, alt: message.file_name || 'Фото' }),
-      h('div', { class: 'viewer-bar' },
-        message.file_path && h('button', { class: 'btn', type: 'button', onclick: () => downloadFile(message) }, 'Скачать'),
-        h('button', { class: 'btn', type: 'button', onclick: () => viewer.close() }, 'Закрыть')));
+    const img = h('img', { src, alt: message.file_name || 'Фото', draggable: 'false' });
+    const stage = h('div', { class: 'viewer-stage' }, img);
+    const iconBtn = (name, label, onclick) => {
+      const button = h('button', { class: 'viewer-btn', type: 'button', 'aria-label': label, title: label, onclick });
+      button.innerHTML = ICONS[name];
+      return button;
+    };
+    viewer.replaceChildren(stage, h('div', { class: 'viewer-bar' },
+      iconBtn('close', 'Закрыть', () => viewer.close()),
+      h('span', { class: 'viewer-title' }, message.sender_id ? nameOf(message.sender_id) : ''),
+      message.file_path ? iconBtn('download', 'Скачать', () => downloadFile(message)) : h('span', { class: 'viewer-btn-gap' })));
+
+    let scale = 1, x = 0, y = 0;
+    const pointers = new Map();
+    let pinch = null, pan = null, lastTap = 0, moved = false, downOnImage = false;
+    const apply = (smooth) => {
+      img.style.transition = smooth ? 'transform .18s ease-out' : 'none';
+      img.style.transform = `translate(${x}px, ${y}px) scale(${scale})`;
+    };
+    // Не даём утащить картинку за край экрана.
+    const clamp = () => {
+      scale = Math.min(5, Math.max(1, scale));
+      if (scale === 1) { x = 0; y = 0; return; }
+      const maxX = (img.offsetWidth * scale - stage.clientWidth) / 2;
+      const maxY = (img.offsetHeight * scale - stage.clientHeight) / 2;
+      x = Math.max(-Math.max(0, maxX), Math.min(Math.max(0, maxX), x));
+      y = Math.max(-Math.max(0, maxY), Math.min(Math.max(0, maxY), y));
+    };
+    // Увеличение вокруг точки (cx, cy) на экране: эта точка остаётся под пальцем.
+    const zoomAt = (next, cx, cy) => {
+      const rect = stage.getBoundingClientRect();
+      const px = cx - rect.left - rect.width / 2;
+      const py = cy - rect.top - rect.height / 2;
+      const k = Math.min(5, Math.max(1, next)) / scale;
+      x = px - (px - x) * k;
+      y = py - (py - y) * k;
+      scale *= k;
+      clamp();
+    };
+    const distance = () => {
+      const [a, b] = [...pointers.values()];
+      return Math.hypot(a.x - b.x, a.y - b.y);
+    };
+    const middle = () => {
+      const [a, b] = [...pointers.values()];
+      return { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 };
+    };
+
+    stage.addEventListener('pointerdown', (event) => {
+      if (pointers.size === 0) downOnImage = event.target === img;
+      stage.setPointerCapture(event.pointerId);
+      pointers.set(event.pointerId, { x: event.clientX, y: event.clientY });
+      moved = false;
+      if (pointers.size === 2) { pinch = { dist: distance(), scale }; pan = null; }
+      else if (pointers.size === 1) pan = { x: event.clientX - x, y: event.clientY - y };
+    });
+    stage.addEventListener('pointermove', (event) => {
+      if (!pointers.has(event.pointerId)) return;
+      const prev = pointers.get(event.pointerId);
+      if (Math.hypot(event.clientX - prev.x, event.clientY - prev.y) > 3) moved = true;
+      pointers.set(event.pointerId, { x: event.clientX, y: event.clientY });
+      if (pinch && pointers.size === 2) {
+        const c = middle();
+        zoomAt(pinch.scale * distance() / pinch.dist, c.x, c.y);
+        apply(false);
+      } else if (pan && scale > 1) {
+        x = event.clientX - pan.x;
+        y = event.clientY - pan.y;
+        clamp();
+        apply(false);
+      }
+    });
+    const release = (event) => {
+      if (!pointers.has(event.pointerId)) return;
+      pointers.delete(event.pointerId);
+      if (pointers.size < 2) pinch = null;
+      if (pointers.size === 1) {
+        const [rest] = pointers.values();
+        pan = { x: rest.x - x, y: rest.y - y };
+        return;
+      }
+      pan = null;
+      if (event.type !== 'pointerup' || moved) return;
+      // Двойное нажатие: приблизить в этом месте или вернуть как было.
+      const now = Date.now();
+      if (now - lastTap < 300) {
+        if (scale > 1) { scale = 1; clamp(); } else zoomAt(2.5, event.clientX, event.clientY);
+        apply(true);
+        lastTap = 0;
+      } else {
+        lastTap = now;
+        // Одиночное нажатие мимо картинки закрывает просмотр.
+        const onImage = downOnImage;
+        setTimeout(() => { if (lastTap === now && scale === 1 && !onImage) viewer.close(); }, 300);
+      }
+    };
+    stage.addEventListener('pointerup', release);
+    stage.addEventListener('pointercancel', release);
+    stage.addEventListener('wheel', (event) => {
+      event.preventDefault();
+      zoomAt(scale * (event.deltaY < 0 ? 1.2 : 1 / 1.2), event.clientX, event.clientY);
+      apply(true);
+    }, { passive: false });
+
+    apply(false);
     viewer.showModal();
+  }
+
+  // ───────────────────────── Ответ на сообщение ─────────────────────────
+
+  const replyCache = new Map();
+
+  function replyPreview(message) {
+    if (!message) return 'Сообщение удалено';
+    if (message.body) return message.body.replace(/\s+/g, ' ');
+    if ((message.file_type || '').startsWith('image/')) return '📷 Фото';
+    if (message.file_name) return '📎 ' + message.file_name;
+    return 'Сообщение';
+  }
+
+  // Исходное сообщение ищется среди загруженных, а если оно старое, подтягивается с сервера один раз.
+  function findOriginal(id) {
+    const local = state.messages.find((m) => m.id === id);
+    if (local) return Promise.resolve(local);
+    if (!replyCache.has(id)) {
+      replyCache.set(id, sb.from('messages').select('id, chat_id, sender_id, body, file_name, file_type')
+        .eq('id', id).maybeSingle().then(({ data }) => data || null, () => null));
+    }
+    return replyCache.get(id);
+  }
+
+  function quoteEl(id) {
+    const name = h('strong', null, '…');
+    const text = h('span', null, '');
+    const el = h('button', { class: 'quote', type: 'button', onclick: (event) => { event.stopPropagation(); jumpTo(id); } }, name, text);
+    const fill = (original) => {
+      el.style.setProperty('--quote', original ? colorFor(original.sender_id || '') : 'var(--muted)');
+      name.textContent = original ? (original.sender_id === state.me.id ? 'Ты' : nameOf(original.sender_id)) : '';
+      text.textContent = replyPreview(original);
+      el.classList.toggle('gone', !original);
+    };
+    const local = state.messages.find((m) => m.id === id);
+    if (local) fill(local);
+    else findOriginal(id).then(fill);
+    return el;
+  }
+
+  // Прокрутить к исходному сообщению и подсветить его.
+  function jumpTo(id) {
+    const el = $('messages').querySelector(`.msg[data-id="${id}"]`);
+    if (!el) return toast('Это сообщение выше, прокрути историю вверх.');
+    el.scrollIntoView({ block: 'center', behavior: 'smooth' });
+    el.classList.remove('flash');
+    void el.offsetWidth;
+    el.classList.add('flash');
+  }
+
+  function setReply(message) {
+    if (!message || message.pending || message.failed) return;
+    state.replyTo = message;
+    const bar = $('reply-bar');
+    bar.style.setProperty('--quote', colorFor(message.sender_id || ''));
+    $('reply-name').textContent = message.sender_id === state.me.id ? 'Ответ себе' : 'Ответ ' + nameOf(message.sender_id);
+    $('reply-text').textContent = replyPreview(message);
+    bar.hidden = false;
+    $('message-input').focus();
+    if (stickToBottom) scrollToBottom();
+  }
+
+  function clearReply() {
+    state.replyTo = null;
+    $('reply-bar').hidden = true;
+  }
+
+  // Забирает ответ для отправляемого сообщения: он прикрепляется к первому сообщению и сбрасывается.
+  function takeReply() {
+    const id = state.replyTo && state.replyTo.chat_id === state.chatId ? state.replyTo.id : null;
+    clearReply();
+    return id;
   }
 
   // ───────────────────────── Действия с сообщением ─────────────────────────
@@ -774,7 +958,10 @@
   function messageMenu(message) {
     if (message.pending || message.failed) return;
     const own = message.sender_id === state.me.id;
-    const items = [];
+    const items = [h('button', {
+      class: 'btn wide', type: 'button',
+      onclick: () => { closeModal(); setReply(message); },
+    }, 'Ответить')];
     if (message.body) {
       items.push(h('button', {
         class: 'btn wide', type: 'button',
@@ -795,7 +982,6 @@
         },
       }, 'Удалить у всех'));
     }
-    if (!items.length) return;
     openModal('Сообщение', h('div', { class: 'stack' }, items));
   }
 
@@ -1719,9 +1905,19 @@
     window.addEventListener('popstate', () => { if (state.chatId) closeChat(); });
 
     $('composer').addEventListener('submit', (event) => { event.preventDefault(); sendText(); });
+    $('reply-cancel').addEventListener('click', clearReply);
+    $('reply-bar').addEventListener('click', (event) => {
+      if (event.target.closest('#reply-cancel') || !state.replyTo) return;
+      jumpTo(state.replyTo.id);
+    });
     const input = $('message-input');
     input.addEventListener('input', autosize);
     input.addEventListener('keydown', (event) => {
+      if (event.key === 'Escape' && state.replyTo) {
+        event.preventDefault();
+        clearReply();
+        return;
+      }
       if (event.key === 'Enter' && !event.shiftKey && !event.isComposing && !isTouch()) {
         event.preventDefault();
         sendText();
@@ -1747,26 +1943,82 @@
     });
 
     // Меню сообщения: правая кнопка мыши или долгое нажатие пальцем.
-    const menuFor = (target) => {
+    const messageAt = (target) => {
       const el = target.closest && target.closest('.msg');
-      const message = el && state.messages.find((m) => m.id === el.dataset.id);
-      if (message) messageMenu(message);
+      return el && state.messages.find((m) => m.id === el.dataset.id);
+    };
+    let menuShownAt = 0;
+    const menuFor = (target) => {
+      const message = messageAt(target);
+      // Долгое нажатие на телефоне вызывает и наш таймер, и системное меню: открываем окно один раз.
+      if (message && Date.now() - menuShownAt > 800) {
+        menuShownAt = Date.now();
+        messageMenu(message);
+      }
       return !!message;
     };
     box.addEventListener('contextmenu', (event) => {
       if (event.target.closest('a')) return;
       if (menuFor(event.target)) event.preventDefault();
     });
+    // Двойной клик мышью по сообщению: ответить на него.
+    box.addEventListener('dblclick', (event) => {
+      if (isTouch() || event.target.closest('a, button, .photo')) return;
+      const message = messageAt(event.target);
+      if (message) { window.getSelection().removeAllRanges(); setReply(message); }
+    });
+
+    // Свайп сообщения влево: ответить, как в Телеграме.
     let pressTimer = null;
+    let swipe = null;
     box.addEventListener('touchstart', (event) => {
       clearTimeout(pressTimer);
-      pressTimer = setTimeout(() => menuFor(event.target), 550);
+      pressTimer = setTimeout(() => { swipe = null; menuFor(event.target); }, 550);
+      const el = event.target.closest('.msg');
+      const touch = event.touches[0];
+      swipe = el && event.touches.length === 1
+        ? { el, bubble: el.querySelector('.bubble'), x: touch.clientX, y: touch.clientY, dx: 0, active: false }
+        : null;
     }, { passive: true });
-    for (const type of ['touchend', 'touchmove', 'touchcancel']) {
-      box.addEventListener(type, () => clearTimeout(pressTimer), { passive: true });
-    }
+    box.addEventListener('touchmove', (event) => {
+      clearTimeout(pressTimer);
+      if (!swipe) return;
+      const touch = event.touches[0];
+      const dx = touch.clientX - swipe.x;
+      const dy = touch.clientY - swipe.y;
+      if (!swipe.active) {
+        if (Math.abs(dy) > 12 && Math.abs(dy) > Math.abs(dx)) { swipe = null; return; }
+        if (dx < -12 && Math.abs(dx) > Math.abs(dy)) swipe.active = true;
+        else return;
+      }
+      swipe.dx = Math.max(-90, Math.min(0, dx));
+      swipe.bubble.style.transition = 'none';
+      swipe.bubble.style.transform = `translateX(${swipe.dx}px)`;
+      swipe.el.classList.toggle('swipe-ready', swipe.dx <= -60);
+    }, { passive: true });
+    const endSwipe = () => {
+      clearTimeout(pressTimer);
+      if (!swipe) return;
+      const { el, bubble, dx, active } = swipe;
+      swipe = null;
+      if (!active) return;
+      bubble.style.transition = 'transform .18s ease-out';
+      bubble.style.transform = '';
+      el.classList.remove('swipe-ready');
+      if (dx <= -60) {
+        const message = state.messages.find((m) => m.id === el.dataset.id);
+        if (message) {
+          if (navigator.vibrate) navigator.vibrate(10);
+          setReply(message);
+        }
+      }
+    };
+    box.addEventListener('touchend', endSwipe, { passive: true });
+    box.addEventListener('touchcancel', endSwipe, { passive: true });
 
     $('viewer').addEventListener('click', (event) => { if (event.target === $('viewer')) $('viewer').close(); });
+    // iPhone не слушается запрета на увеличение страницы, поэтому щипок гасим вручную.
+    document.addEventListener('gesturestart', (event) => event.preventDefault());
     $('modal').addEventListener('click', (event) => { if (event.target === $('modal')) closeModal(); });
 
     document.addEventListener('visibilitychange', () => {
@@ -1778,6 +2030,9 @@
     // На телефоне клавиатура перекрывает экран: подгоняем высоту под видимую область.
     if (window.visualViewport) {
       const fit = () => {
+        // Если страницу всё же увеличили (например, жестом в старом браузере), высоту не трогаем,
+        // иначе вёрстка сожмётся под увеличенный кусок экрана.
+        if (window.visualViewport.scale > 1.05) return;
         document.documentElement.style.setProperty('--app-height', window.visualViewport.height + 'px');
         if (stickToBottom && state.chatId) scrollToBottom();
       };
