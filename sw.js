@@ -1,5 +1,5 @@
 // Сервис-воркер: держит оболочку приложения в кеше и показывает пуш-уведомления.
-const CACHE = 'apelsin-v5';
+const CACHE = 'apelsin-v6';
 const ASSETS = [
   './', 'index.html', 'app.css', 'app.js', 'config.js', 'vendor/supabase.js',
   'manifest.webmanifest', 'icons/icon.svg', 'icons/icon-192.png', 'icons/badge.png',

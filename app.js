@@ -2066,8 +2066,26 @@
     sb = window.supabase.createClient(cfg.supabaseUrl, cfg.supabaseKey);
 
     if ('serviceWorker' in navigator) {
-      navigator.serviceWorker.register('sw.js').catch(() => {});
+      // Новая версия сайта ставится сама: при возвращении в приложение проверяем обновление,
+      // а когда оно установилось, перезагружаем страницу в спокойный момент (ничего не набрано и не открыто).
+      const hadController = !!navigator.serviceWorker.controller;
+      navigator.serviceWorker.register('sw.js').then((reg) => {
+        document.addEventListener('visibilitychange', () => {
+          if (document.visibilityState === 'visible') reg.update().catch(() => {});
+        });
+      }).catch(() => {});
       swReady = navigator.serviceWorker.ready;
+      let updatePending = false;
+      const quiet = () => !$('message-input').value.trim() && !$('modal').open && !$('viewer').open;
+      const reloadIfQuiet = () => { if (updatePending && quiet()) location.reload(); };
+      navigator.serviceWorker.addEventListener('controllerchange', () => {
+        if (!hadController || updatePending) return;
+        updatePending = true;
+        reloadIfQuiet();
+      });
+      document.addEventListener('visibilitychange', reloadIfQuiet);
+      $('viewer').addEventListener('close', () => setTimeout(reloadIfQuiet, 300));
+      $('modal').addEventListener('close', () => setTimeout(reloadIfQuiet, 300));
     }
     bindUI();
 
