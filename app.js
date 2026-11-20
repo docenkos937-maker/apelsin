@@ -575,11 +575,21 @@
     if (keepDown || message.sender_id === state.me.id) scrollToBottom();
   }
 
+  // Убирает из шторки телефона уведомления этого чата: чат прочитан, напоминать больше не о чем.
+  function clearNotifications(chatId) {
+    if (!swReady || !chatId) return;
+    swReady
+      .then((reg) => reg.getNotifications({ tag: chatId }))
+      .then((list) => list.forEach((notification) => notification.close()))
+      .catch(() => {});
+  }
+
   let readTimer = null;
   function markRead() {
     const id = state.chatId;
     const chat = id && findChat(id);
     if (!chat || !isLooking()) return;
+    clearNotifications(id);
     if (chat.unread > 0) {
       chat.unread = 0;
       renderChatList();
